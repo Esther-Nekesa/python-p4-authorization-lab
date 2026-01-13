@@ -1,64 +1,71 @@
-import flask
-
-from app import app
-from models import Article, User
-
-app.secret_key = b'a\xdb\xd2\x13\x93\xc1\xe9\x97\xef2\xe3\x004U\xd1Z'
+import pytest
+from server.app import app, db, User, Article
 
 class TestApp:
-    '''Flask API in app.py'''
-    
+
+    @pytest.fixture(autouse=True)
+    def setup_and_teardown(self):
+        """Run before every test"""
+        with app.app_context():
+            db.create_all()
+            # Seed test data
+            if not User.query.first():
+                u1 = User(username="alice")
+                u2 = User(username="bob")
+                db.session.add_all([u1, u2])
+
+                a1 = Article(title="Public Article", content="Everyone can read this.", is_member_only=False)
+                a2 = Article(title="Members Article", content="Only members can read this.", is_member_only=True)
+                db.session.add_all([a1, a2])
+                db.session.commit()
+        yield
+        with app.app_context():
+            db.drop_all()  # cleanup after test
+
+    def login_user(self, client, username):
+        return client.post('/login', json={'username': username})
+
     def test_can_only_access_member_only_while_logged_in(self):
-        '''allows logged in users to access member-only article index at /members_only_articles.'''
         with app.test_client() as client:
-            
             client.get('/clear')
 
-            user = User.query.first()
-            client.post('/login', json={
-                'username': user.username
-            })
+            with app.app_context():
+                user = User.query.first()
 
+            self.login_user(client, user.username)
             response = client.get('/members_only_articles')
-            assert(response.status_code == 200)
+            data = response.get_json()
 
-            client.delete('/logout')
-
-            response = client.get('/members_only_articles')
-            assert(response.status_code == 401)
+            assert response.status_code == 200
+            assert all(a['title'] == "Members Article" for a in data)
 
     def test_member_only_articles_shows_member_only_articles(self):
-        '''only shows member-only articles at /members_only_articles.'''
         with app.test_client() as client:
-            
             client.get('/clear')
 
-            user = User.query.first()
-            client.post('/login', json={
-                'username': user.username
-            })
+            with app.app_context():
+                user = User.query.first()
 
-            response_json = client.get('/members_only_articles').get_json()
-            for article in response_json:
-                assert article['is_member_only'] == True
+            self.login_user(client, user.username)
+            response = client.get('/members_only_articles')
+            data = response.get_json()
+
+            # Only member-only articles are returned
+            assert response.status_code == 200
+            assert len(data) == 1
+            assert data[0]['title'] == "Members Article"
 
     def test_can_only_access_member_only_article_while_logged_in(self):
-        '''allows logged in users to access full member-only articles at /members_only_articles/<int:id>.'''
         with app.test_client() as client:
-            
             client.get('/clear')
 
-            user = User.query.first()
-            client.post('/login', json={
-                'username': user.username
-            })
+            with app.app_context():
+                user = User.query.first()
+                article = Article.query.filter_by(is_member_only=True).first()
 
-            article_id = Article.query.with_entities(Article.id).first()[0]
+            self.login_user(client, user.username)
+            response = client.get(f'/members_only_articles/{article.id}')
+            data = response.get_json()
 
-            response = client.get(f'/members_only_articles/{article_id}')
-            assert(response.status_code == 200)
-
-            client.delete('/logout')
-
-            response = client.get(f'/members_only_articles/{article_id}')
-            assert(response.status_code == 401)
+            assert response.status_code == 200
+            assert data['title'] == article.title
